@@ -1,0 +1,1002 @@
+#!/usr/bin/env python3
+"""
+商品图片下载器
+支持京东、天猫、淘宝平台
+"""
+
+import asyncio
+import os
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+import aiohttp
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+
+
+class ProductDownloader:
+    def __init__(self, output_dir="downloads"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+        self.results = {
+            "success": [],
+            "failed": []
+        }
+        self.folder_counter = {}
+
+    def parse_platform(self, url):
+        """识别电商平台"""
+        domain = urlparse(url).netloc.lower()
+        if "jd.com" in domain:
+            return "jd"
+        elif "tmall.com" in domain:
+            return "tmall"
+        elif "taobao.com" in domain:
+            return "taobao"
+        return None
+
+    def is_url(self, text):
+        """判断是否是 URL"""
+        return text.startswith("http://") or text.startswith("https://") or text.startswith("www.")
+
+    async def scroll_to_bottom_gradually(self, page, max_scrolls=20):
+        """逐步滚动到页面底部，确保所有图片都加载"""
+        print("  开始逐步滚动页面，加载所有图片...")
+
+        import random
+
+        last_height = await page.evaluate("document.body.scrollHeight")
+        scroll_count = 0
+
+        while scroll_count < max_scrolls:
+            # 滚动一小段距离
+            scroll_step = random.randint(300, 500)
+            await page.evaluate(f"window.scrollBy(0, {scroll_step})")
+
+            # 随机等待 1-2 秒，让图片加载
+            await asyncio.sleep(random.uniform(1, 2))
+
+            # 获取新的页面高度
+            new_height = await page.evaluate("document.body.scrollHeight")
+            current_position = await page.evaluate("window.pageYOffset + window.innerHeight")
+
+            scroll_count += 1
+
+            # 如果已经到达底部，再多滚动几次确保所有图片都加载
+            if current_position >= new_height - 100:
+                print(f"  已到达页面底部，再滚动 2 次确保图片加载...")
+                for _ in range(2):
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(2)
+                break
+
+            # 如果页面高度没有变化，说明可能已经到底了
+            if new_height == last_height and current_position >= new_height - 100:
+                break
+
+            last_height = new_height
+
+        print(f"  滚动完成，共滚动 {scroll_count} 次")
+
+    async def get_all_images_js(self, page, platform):
+        """使用 JavaScript 获取页面上所有商品图片"""
+        print("  使用 JavaScript 获取所有图片...")
+
+        js_code = """
+        () => {
+            const images = [];
+            const seen = new Set();
+
+            // 获取所有 img 标签
+            document.querySelectorAll('img').forEach(img => {
+                const src = img.src || img.dataset.src || img.dataset.lazySrc ||
+                           img.dataset.original || img.dataset.url;
+
+                if (!src) return;
+
+                // 过滤掉太小的图片（图标、logo等）
+                const width = img.naturalWidth || img.width || 0;
+                const height = img.naturalHeight || img.height || 0;
+
+                // 至少一个维度大于 200px，或者包含特定关键词
+                const isLargeEnough = width > 200 || height > 200;
+                const hasProductKeyword = src.includes('img') || src.includes('image') ||
+                                         src.includes('pic') || src.includes('photo');
+
+                if ((isLargeEnough || hasProductKeyword) && !seen.has(src)) {
+                    seen.add(src);
+                    images.push({
+                        src: src,
+                        width: width,
+                        height: height,
+                        alt: img.alt || '',
+                        className: img.className || ''
+                    });
+                }
+            });
+
+            // 按图片大小排序（大图优先）
+            images.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+
+            return images;
+        }
+        """
+
+        try:
+            images = await page.evaluate(js_code)
+            print(f"  JavaScript 找到 {len(images)} 张图片")
+            return images
+        except Exception as e:
+            print(f"  JavaScript 获取图片失败: {e}")
+            return []
+
+    async def search_taobao(self, page, keyword):
+        """在淘宝搜索商品并进入第一个商品详情页"""
+        print(f"在淘宝搜索: {keyword}")
+
+        # 构建搜索 URL
+        from urllib.parse import quote
+        import random
+        search_url = f"https://s.taobao.com/search?q={quote(keyword)}"
+
+        await page.goto(search_url, wait_until="networkidle", timeout=60000)
+
+        # 随机延迟 2-4 秒，模拟人类行为
+        delay = random.uniform(2, 4)
+        print(f"  等待 {delay:.1f} 秒...")
+        await asyncio.sleep(delay)
+
+        # 保存搜索页面截图
+        await page.screenshot(path="debug_search.png")
+        print("  已保存搜索页面截图: debug_search.png")
+
+        # 尝试点击第一个商品
+        try:
+            print("  查找第一个商品链接...")
+
+            # 淘宝搜索结果的商品链接可能在这些位置
+            first_item_selectors = [
+                "a[href*='item.taobao.com']",
+                "a[href*='detail.tmall.com']",
+                ".items .item a",
+                ".Card--doubleCardWrapper-- a"
+            ]
+
+            first_item_link = None
+            for selector in first_item_selectors:
+                links = await page.query_selector_all(selector)
+                if links:
+                    # 找到第一个有效的商品链接
+                    for link in links[:5]:  # 检查前5个链接
+                        href = await link.get_attribute("href")
+                        if href and ("item.taobao.com" in href or "detail.tmall.com" in href):
+                            first_item_link = link
+                            print(f"  找到商品链接: {href[:80]}...")
+                            break
+                    if first_item_link:
+                        break
+
+            if not first_item_link:
+                print("  未找到商品链接，从搜索结果页抓取图片...")
+                # 如果找不到商品链接，回退到原来的逻辑
+                return await self._get_images_from_search_page(page, keyword)
+
+            # 点击进入商品详情页
+            print("  点击进入商品详情页...")
+
+            # 获取链接 URL 并在新标签页打开（避免页面跳转问题）
+            detail_url = await first_item_link.get_attribute("href")
+            if detail_url.startswith("//"):
+                detail_url = "https:" + detail_url
+
+            # 随机延迟 1-2 秒
+            await asyncio.sleep(random.uniform(1, 2))
+
+            # 导航到详情页
+            await page.goto(detail_url, wait_until="networkidle", timeout=60000)
+
+            # 随机延迟 3-5 秒，等待页面完全加载
+            delay = random.uniform(3, 5)
+            print(f"  等待详情页加载 {delay:.1f} 秒...")
+            await asyncio.sleep(delay)
+
+            # 检查是否需要登录
+            page_title = await page.title()
+            if "登录" in page_title or "login" in page_title.lower():
+                print("  检测到登录页面，等待 30 秒供您登录...")
+                await asyncio.sleep(30)
+                print("  继续处理...")
+
+            # 保存详情页截图
+            await page.screenshot(path="debug_detail.png")
+            print("  已保存详情页截图: debug_detail.png")
+
+            # 现在调用淘宝详情页的抓取方法
+            return await self.download_taobao(page, detail_url)
+
+        except Exception as e:
+            print(f"  进入详情页失败: {e}")
+            print("  回退到搜索结果页抓取...")
+            return await self._get_images_from_search_page(page, keyword)
+
+    async def _get_images_from_search_page(self, page, keyword):
+        """从搜索结果页抓取图片（备用方案）"""
+        cover_urls = []
+
+        try:
+            # 先尝试通过 JavaScript 获取所有图片
+            print("  尝试通过 JavaScript 获取所有图片...")
+            js_result = await page.evaluate("""
+                () => {
+                    const images = [];
+                    // 获取所有 img 标签
+                    document.querySelectorAll('img').forEach(img => {
+                        if (img.src && img.src.includes('alicdn.com')) {
+                            // 过滤掉小图标和 logo
+                            if (img.width > 100 || img.height > 100 ||
+                                img.src.includes('bao/uploaded') ||
+                                img.src.includes('imgextra')) {
+                                images.push({
+                                    src: img.src,
+                                    width: img.width,
+                                    height: img.height,
+                                    className: img.className
+                                });
+                            }
+                        }
+                    });
+                    return images;
+                }
+            """)
+
+            print(f"  JavaScript 找到 {len(js_result)} 张图片")
+            for img_info in js_result[:20]:  # 只取前20张
+                src = img_info['src']
+                # 将小图转换为大图
+                src = src.replace('_sum.jpg', '').replace('_210x210.jpg', '').replace('_180x180.jpg', '')
+                src = src.replace('_50x50.jpg', '_800x800.jpg')
+
+                if src not in cover_urls:
+                    cover_urls.append(src)
+                    print(f"    添加图片 ({img_info['width']}x{img_info['height']}): {src[:80]}...")
+
+        except Exception as e:
+            print(f"  JavaScript 抓取失败: {e}")
+
+        return keyword, cover_urls, []  # 返回格式：标题, 头图列表, 详情图列表
+
+    def sanitize_filename(self, name):
+        """清理文件名中的非法字符"""
+        # 移除或替换非法字符
+        name = re.sub(r'[<>:"/\\|?*]', '_', name)
+        # 移除前后空格
+        name = name.strip()
+        # 限制长度
+        if len(name) > 100:
+            name = name[:100]
+        return name or "unnamed"
+
+    def create_folder_structure(self, title):
+        """创建文件夹结构，处理重复标题"""
+        clean_title = self.sanitize_filename(title)
+
+        # 处理重复标题
+        if clean_title in self.folder_counter:
+            self.folder_counter[clean_title] += 1
+            folder_name = f"{clean_title}_{self.folder_counter[clean_title]}"
+        else:
+            self.folder_counter[clean_title] = 0
+            folder_name = clean_title
+
+        product_dir = self.output_dir / folder_name
+        cover_dir = product_dir / "cover"
+        detail_dir = product_dir / "detail"
+
+        product_dir.mkdir(exist_ok=True)
+        cover_dir.mkdir(exist_ok=True)
+        detail_dir.mkdir(exist_ok=True)
+
+        return product_dir, cover_dir, detail_dir
+
+    async def download_image(self, session, url, path, index):
+        """下载单张图片"""
+        try:
+            # 处理相对 URL
+            if url.startswith("//"):
+                url = "https:" + url
+
+            async with session.get(url, timeout=30, ssl=False) as response:
+                if response.status == 200:
+                    content = await response.read()
+                    # 从 URL 获取扩展名，默认 jpg
+                    ext = Path(urlparse(url).path).suffix or ".jpg"
+                    file_path = path / f"{index:03d}{ext}"
+                    file_path.write_bytes(content)
+                    return True
+        except Exception as e:
+            print(f"  下载图片失败 {url}: {e}")
+        return False
+
+    async def download_jd(self, page, url):
+        """下载京东商品"""
+        print(f"正在处理京东商品: {url}")
+
+        await page.goto(url, wait_until="networkidle", timeout=60000)
+
+        # 检查是否需要登录
+        page_title = await page.title()
+        if "登录" in page_title:
+            print("  检测到登录页面，请在浏览器中完成登录...")
+            print("  等待 30 秒供您登录...")
+            await asyncio.sleep(30)  # 等待 30 秒供用户登录
+            print("  继续处理...")
+        else:
+            print("  页面已加载，等待 5 秒...")
+            await asyncio.sleep(5)
+
+        # 调试：保存页面截图
+        await page.screenshot(path="debug_jd.png")
+        print("  已保存调试截图: debug_jd.png")
+
+        # 调试：保存页面 HTML
+        html_content = await page.content()
+        with open("debug_jd.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print("  已保存页面 HTML: debug_jd.html")
+
+        # 获取商品标题 - 扩展选择器列表
+        title_selectors = [
+            ".sku-name",
+            ".itemInfo-wrap .sku-name",
+            "div.sku-name",
+            ".product-intro .name",
+            "#detail .name",
+            "h1",
+            "[class*='sku-name']",
+            "[class*='product-name']",
+            "[class*='item-name']"
+        ]
+        title = None
+        for selector in title_selectors:
+            try:
+                title_elem = await page.query_selector(selector)
+                if title_elem:
+                    title = await title_elem.inner_text()
+                    title = title.strip()
+                    if title:
+                        print(f"  找到标题 (选择器: {selector}): {title[:50]}...")
+                        break
+            except:
+                continue
+
+        if not title:
+            # 调试：输出页面标题
+            page_title = await page.title()
+            print(f"  页面标题: {page_title}")
+            raise Exception("无法获取商品标题")
+
+        print(f"  商品标题: {title}")
+
+        # 创建文件夹
+        product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
+
+        # 使用改进的滚动方法，逐步滚动到页面底部，确保所有图片都加载
+        await self.scroll_to_bottom_gradually(page, max_scrolls=30)
+
+        # 回到页面顶部，准备抓取头图
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(2)
+
+        # 尝试触发图片加载 - 移动鼠标到图片区域
+        try:
+            preview_area = await page.query_selector("#preview, .preview, .main-img, #main-image")
+            if preview_area:
+                await preview_area.hover()
+                await asyncio.sleep(2)
+        except:
+            pass
+
+        # 获取头图 - 重点抓取商品实物图片
+        cover_urls = []
+
+        # 方法1: 从页面 JavaScript 中提取 imageList 数据（京东特有）
+        try:
+            print("  尝试从 JavaScript 中提取 imageList...")
+            image_list = await page.evaluate("""
+                () => {
+                    // 查找页面中的 imageList 变量
+                    const scripts = document.querySelectorAll('script');
+                    for (let script of scripts) {
+                        const text = script.textContent;
+                        const match = text.match(/imageList:\s*\[(.*?)\]/);
+                        if (match) {
+                            try {
+                                // 提取图片路径列表
+                                const paths = match[1].match(/"([^"]+)"/g);
+                                if (paths) {
+                                    return paths.map(p => p.replace(/"/g, ''));
+                                }
+                            } catch (e) {
+                                console.error(e);
+                            }
+                        }
+                    }
+                    return [];
+                }
+            """)
+
+            if image_list:
+                print(f"  从 JavaScript 中找到 {len(image_list)} 张头图")
+                for path in image_list:
+                    # 移除 .avif 后缀，使用 .jpg
+                    path = path.replace('.avif', '').replace('.webp', '')
+                    if not path.endswith('.jpg') and not path.endswith('.png'):
+                        path = path + '.jpg'
+
+                    # 构建完整 URL - 使用 /n1/ 获取大图
+                    url = f"https://img14.360buyimg.com/n1/{path}"
+                    cover_urls.append(url)
+                    print(f"    添加头图: {url[:80]}...")
+        except Exception as e:
+            print(f"  从 JavaScript 提取 imageList 失败: {e}")
+
+        # 方法2: 尝试从缩略图列表获取（备用方案）
+        if not cover_urls:
+            try:
+                # 京东的缩略图通常在 #spec-list 或 .spec-items 中
+                # 新版京东可能在 #main-image .list .item img
+                thumb_imgs = await page.query_selector_all(
+                    "#spec-list img, .spec-items img, ul.spec-items img, li.spec-item img, "
+                    "#main-image .list .item img, .preview-wrap .list .item img"
+                )
+                print(f"  找到缩略图元素: {len(thumb_imgs)} 个")
+
+                for img in thumb_imgs:
+                    # 尝试多个属性
+                    src = (await img.get_attribute("src") or
+                           await img.get_attribute("data-lazy-img") or
+                           await img.get_attribute("data-src") or
+                           await img.get_attribute("data-url") or
+                           await img.get_attribute("data-original"))
+
+                    if src:
+                        src = src.strip()
+
+                        # 跳过占位图
+                        if "imagetools" in src and "68f9ecedF64a04bb8" in src:
+                            continue
+
+                        # 将缩略图 URL 转换为大图 URL
+                        src = src.replace("/n5/", "/n1/").replace("/n0/", "/n1/").replace("/n7/", "/n1/")
+                        src = src.replace("s54x54_", "s800x800_").replace("s40x40_", "s800x800_").replace("s350x350_", "s800x800_")
+
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        elif src.startswith("/"):
+                            src = "https://item.jd.com" + src
+
+                        if src not in cover_urls and any(ext in src.lower() for ext in ["img", "jpg", "png", "jpeg", "webp"]):
+                            cover_urls.append(src)
+                            print(f"    添加头图: {src[:80]}...")
+
+                if cover_urls:
+                    print(f"  找到头图 (缩略图列表): {len(cover_urls)} 张")
+            except Exception as e:
+                print(f"  缩略图抓取失败: {e}")
+
+        # 方法2: 如果方法1失败，尝试从主图区域获取
+        if not cover_urls:
+            try:
+                main_img = await page.query_selector("#preview img, .jqzoom img, .main-img img, #spec-n1 img")
+                if main_img:
+                    src = await main_img.get_attribute("src") or await main_img.get_attribute("data-lazy-img") or await main_img.get_attribute("data-src")
+                    if src:
+                        src = src.strip()
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        cover_urls.append(src)
+                        print(f"  找到头图 (主图区域): 1 张")
+            except Exception as e:
+                print(f"  主图抓取失败: {e}")
+
+        # 方法3: 尝试通过 JavaScript 获取图片数据
+        if not cover_urls:
+            try:
+                print("  尝试通过 JavaScript 获取图片...")
+                js_urls = await page.evaluate("""
+                    () => {
+                        const urls = [];
+                        // 查找所有可能包含商品图片的元素
+                        const imgs = document.querySelectorAll('#spec-list img, .spec-items img, #preview img, .preview img');
+                        imgs.forEach(img => {
+                            if (img.src) urls.push(img.src);
+                            if (img.dataset.lazySrc) urls.push(img.dataset.lazySrc);
+                            if (img.dataset.src) urls.push(img.dataset.src);
+                        });
+                        return urls;
+                    }
+                """)
+                for url in js_urls:
+                    if url and url not in cover_urls:
+                        cover_urls.append(url)
+                if cover_urls:
+                    print(f"  找到头图 (JavaScript): {len(cover_urls)} 张")
+            except Exception as e:
+                print(f"  JavaScript 抓取失败: {e}")
+
+        print(f"  头图 URLs: {cover_urls[:3] if cover_urls else '无'}...")  # 调试：打印前3个URL
+
+        # 获取详情图 - 只抓取商品详情区域
+        detail_urls = []
+        try:
+            # 京东的详情图通常在特定的详情容器中
+            detail_selectors = [
+                "#detail .detail-content img",
+                "#detail img.desc-img",
+                ".ssd-module-wrap img",
+                ".detail-content img",
+                "#J-detail-content img",
+                "#description img"
+            ]
+
+            for selector in detail_selectors:
+                try:
+                    imgs = await page.query_selector_all(selector)
+                    for img in imgs:
+                        src = await img.get_attribute("src") or await img.get_attribute("data-lazy-img") or await img.get_attribute("data-src")
+                        if src:
+                            src = src.strip()
+                            if src.startswith("//"):
+                                src = "https:" + src
+                            elif src.startswith("/"):
+                                src = "https://item.jd.com" + src
+
+                            # 过滤掉明显不是商品图的图片（如小图标、按钮等）
+                            if src not in detail_urls and any(ext in src.lower() for ext in ["img", "jpg", "png", "jpeg", "webp"]):
+                                # 排除太小的图片（通常是图标）
+                                if "s40x40" not in src and "s54x54" not in src:
+                                    detail_urls.append(src)
+
+                    if detail_urls:
+                        print(f"  找到详情图 (选择器: {selector}): {len(detail_urls)} 张")
+                        break
+                except:
+                    continue
+
+            # 如果没有找到详情图，使用 JavaScript 方法作为备用
+            if not detail_urls:
+                print("  使用 JavaScript 方法获取详情图...")
+                all_images = await self.get_all_images_js(page, "jd")
+                for img_info in all_images:
+                    src = img_info['src']
+                    # 过滤出详情图（通常是大图）
+                    if img_info['width'] > 400 or img_info['height'] > 400:
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        if src not in cover_urls and src not in detail_urls:
+                            detail_urls.append(src)
+                if detail_urls:
+                    print(f"  找到详情图 (JavaScript): {len(detail_urls)} 张")
+
+        except Exception as e:
+            print(f"  详情图抓取失败: {e}")
+
+        print(f"  详情图 URLs: {detail_urls[:3] if detail_urls else '无'}...")  # 调试
+
+        return title, cover_urls, detail_urls
+
+    async def download_tmall(self, page, url):
+        """下载天猫商品"""
+        print(f"正在处理天猫商品: {url}")
+
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await asyncio.sleep(3)
+
+        # 获取商品标题
+        title_selectors = [
+            ".tb-detail-hd h1",
+            ".tb-main-title",
+            "h1.tb-title",
+            "h1"
+        ]
+        title = None
+        for selector in title_selectors:
+            try:
+                title_elem = await page.query_selector(selector)
+                if title_elem:
+                    title = await title_elem.inner_text()
+                    title = title.strip()
+                    if title:
+                        break
+            except:
+                continue
+
+        if not title:
+            raise Exception("无法获取商品标题")
+
+        print(f"  商品标题: {title}")
+
+        # 创建文件夹
+        product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
+
+        # 使用改进的滚动方法，逐步滚动到页面底部
+        await self.scroll_to_bottom_gradually(page, max_scrolls=30)
+
+        # 回到页面顶部，准备抓取头图
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(2)
+
+        # 获取头图
+        cover_urls = []
+        cover_selectors = [
+            "#J_UlThumb img",
+            ".tb-thumb img",
+            "ul.tb-thumb li img"
+        ]
+        for selector in cover_selectors:
+            try:
+                imgs = await page.query_selector_all(selector)
+                for img in imgs:
+                    src = await img.get_attribute("src") or await img.get_attribute("data-src")
+                    if src:
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        # 将小图转换为大图
+                        src = src.replace("_sum.jpg", "").replace("_210x210.jpg", "").replace("_180x180.jpg", "")
+                        src = src.replace("_50x50.jpg", "_800x800.jpg")
+                        if src not in cover_urls and ("img" in src or "jpg" in src or "png" in src):
+                            cover_urls.append(src)
+                if cover_urls:
+                    break
+            except:
+                continue
+
+        # 获取详情图
+        detail_urls = []
+        try:
+            detail_selectors = [
+                "#description img",
+                ".detail-content img",
+                "#J-detail-content img",
+                ".tm-clear img",
+                ".attributes-list img"
+            ]
+            for selector in detail_selectors:
+                try:
+                    imgs = await page.query_selector_all(selector)
+                    for img in imgs:
+                        src = await img.get_attribute("src") or await img.get_attribute("data-src")
+                        if src:
+                            if src.startswith("//"):
+                                src = "https:" + src
+                            # 将小图转换为大图
+                            src = src.replace("_sum.jpg", "").replace("_210x210.jpg", "").replace("_180x180.jpg", "")
+                            if src not in detail_urls and ("img" in src or "jpg" in src or "png" in src):
+                                detail_urls.append(src)
+                    if detail_urls:
+                        print(f"  找到详情图 (选择器: {selector}): {len(detail_urls)} 张")
+                        break
+                except:
+                    continue
+
+            # 如果没有找到详情图，使用 JavaScript 方法作为备用
+            if not detail_urls:
+                print("  使用 JavaScript 方法获取详情图...")
+                all_images = await self.get_all_images_js(page, "tmall")
+                for img_info in all_images:
+                    src = img_info['src']
+                    if img_info['width'] > 400 or img_info['height'] > 400:
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        if src not in cover_urls and src not in detail_urls:
+                            detail_urls.append(src)
+                if detail_urls:
+                    print(f"  找到详情图 (JavaScript): {len(detail_urls)} 张")
+        except:
+            pass
+
+        return title, cover_urls, detail_urls
+
+    async def download_taobao(self, page, url):
+        """下载淘宝商品"""
+        print(f"正在处理淘宝商品: {url}")
+
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await asyncio.sleep(3)
+
+        # 获取商品标题
+        title_selectors = [
+            ".tb-main-title",
+            "h1.tb-title",
+            ".ItemTitle--mainTitle--",
+            "h1"
+        ]
+        title = None
+        for selector in title_selectors:
+            try:
+                title_elem = await page.query_selector(selector)
+                if title_elem:
+                    title = await title_elem.inner_text()
+                    title = title.strip()
+                    if title:
+                        break
+            except:
+                continue
+
+        if not title:
+            raise Exception("无法获取商品标题")
+
+        print(f"  商品标题: {title}")
+
+        # 创建文件夹
+        product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
+
+        # 使用改进的滚动方法，逐步滚动到页面底部
+        await self.scroll_to_bottom_gradually(page, max_scrolls=30)
+
+        # 回到页面顶部，准备抓取头图
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(2)
+
+        # 获取头图
+        cover_urls = []
+        cover_selectors = [
+            "#J_UlThumb img",
+            ".tb-thumb img",
+            "ul.tb-thumb li img",
+            ".MainPic--mainPic-- img"
+        ]
+        for selector in cover_selectors:
+            try:
+                imgs = await page.query_selector_all(selector)
+                for img in imgs:
+                    src = await img.get_attribute("src") or await img.get_attribute("data-src")
+                    if src:
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        # 将小图转换为大图
+                        src = src.replace("_sum.jpg", "").replace("_210x210.jpg", "").replace("_180x180.jpg", "")
+                        src = src.replace("_50x50.jpg", "_800x800.jpg")
+                        if src not in cover_urls and ("img" in src or "jpg" in src or "png" in src):
+                            cover_urls.append(src)
+                if cover_urls:
+                    break
+            except:
+                continue
+
+        # 获取详情图
+        detail_urls = []
+        try:
+            detail_selectors = [
+                "#description img",
+                ".detail-content img",
+                "#J-detail-content img",
+                ".Description--desc-- img"
+            ]
+            for selector in detail_selectors:
+                try:
+                    imgs = await page.query_selector_all(selector)
+                    for img in imgs:
+                        src = await img.get_attribute("src") or await img.get_attribute("data-src")
+                        if src:
+                            if src.startswith("//"):
+                                src = "https:" + src
+                            # 将小图转换为大图
+                            src = src.replace("_sum.jpg", "").replace("_210x210.jpg", "").replace("_180x180.jpg", "")
+                            if src not in detail_urls and ("img" in src or "jpg" in src or "png" in src):
+                                detail_urls.append(src)
+                    if detail_urls:
+                        print(f"  找到详情图 (选择器: {selector}): {len(detail_urls)} 张")
+                        break
+                except:
+                    continue
+
+            # 如果没有找到详情图，使用 JavaScript 方法作为备用
+            if not detail_urls:
+                print("  使用 JavaScript 方法获取详情图...")
+                all_images = await self.get_all_images_js(page, "taobao")
+                for img_info in all_images:
+                    src = img_info['src']
+                    if img_info['width'] > 400 or img_info['height'] > 400:
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        if src not in cover_urls and src not in detail_urls:
+                            detail_urls.append(src)
+                if detail_urls:
+                    print(f"  找到详情图 (JavaScript): {len(detail_urls)} 张")
+        except:
+            pass
+
+        return title, cover_urls, detail_urls
+
+    async def download_product(self, browser, url_or_keyword):
+        """下载单个商品（支持 URL 或关键词搜索）"""
+        try:
+            title = None
+            cover_urls = []
+            detail_urls = []
+            input_text = url_or_keyword
+
+            # 判断是 URL 还是关键词
+            if self.is_url(url_or_keyword):
+                # 是 URL，按原来的逻辑处理
+                url = url_or_keyword
+                platform = self.parse_platform(url)
+                if not platform:
+                    print(f"跳过不支持的链接: {url}")
+                    self.results["failed"].append({
+                        "url": url,
+                        "reason": "不支持的平台"
+                    })
+                    return
+
+                # 创建新页面并设置用户代理
+                page = await browser.new_page()
+
+                # 设置用户代理和其他头部信息
+                await page.set_extra_http_headers({
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1'
+                })
+
+                # 隐藏 webdriver 特征
+                await page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                """)
+
+                try:
+                    # 根据平台调用对应的下载方法
+                    if platform == "jd":
+                        title, cover_urls, detail_urls = await self.download_jd(page, url)
+                    elif platform == "tmall":
+                        title, cover_urls, detail_urls = await self.download_tmall(page, url)
+                    elif platform == "taobao":
+                        title, cover_urls, detail_urls = await self.download_taobao(page, url)
+                    else:
+                        raise Exception(f"未实现的平台: {platform}")
+                finally:
+                    await page.close()
+
+            else:
+                # 是关键词，在淘宝搜索
+                keyword = url_or_keyword
+                print(f"检测到关键词搜索: {keyword}")
+
+                page = await browser.new_page()
+
+                # 设置用户代理
+                await page.set_extra_http_headers({
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                })
+
+                try:
+                    title, cover_urls, detail_urls = await self.search_taobao(page, keyword)
+                finally:
+                    await page.close()
+
+            # 创建文件夹
+            product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
+
+            # 下载图片
+            async with aiohttp.ClientSession() as session:
+                # 下载头图
+                print(f"  下载头图: {len(cover_urls)} 张")
+                cover_tasks = [
+                    self.download_image(session, url, cover_dir, i)
+                    for i, url in enumerate(cover_urls, 1)
+                ]
+                cover_results = await asyncio.gather(*cover_tasks)
+                cover_success = sum(cover_results)
+
+                # 下载详情图
+                print(f"  下载详情图: {len(detail_urls)} 张")
+                detail_tasks = [
+                    self.download_image(session, url, detail_dir, i)
+                    for i, url in enumerate(detail_urls, 1)
+                ]
+                detail_results = await asyncio.gather(*detail_tasks)
+                detail_success = sum(detail_results)
+
+            print(f"  完成: 头图 {cover_success}/{len(cover_urls)}, 详情图 {detail_success}/{len(detail_urls)}")
+            print(f"  保存位置: {product_dir}")
+
+            self.results["success"].append({
+                "url": input_text,
+                "title": title,
+                "cover_count": cover_success,
+                "detail_count": detail_success,
+                "path": str(product_dir)
+            })
+
+        except Exception as e:
+            print(f"处理失败 {url_or_keyword}: {e}")
+            self.results["failed"].append({
+                "url": url_or_keyword,
+                "reason": str(e)
+            })
+
+    async def run(self, urls):
+        """批量处理商品链接"""
+        print(f"开始处理 {len(urls)} 个商品链接...\n")
+
+        async with async_playwright() as p:
+            # 使用持久化上下文，保存登录状态
+            user_data_dir = Path.home() / ".product-downloader" / "browser-data"
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+
+            print(f"使用持久化浏览器数据目录: {user_data_dir}")
+            print("提示：首次使用需要登录，之后会自动保持登录状态\n")
+
+            # 使用持久化上下文启动浏览器
+            browser = await p.chromium.launch_persistent_context(
+                str(user_data_dir),
+                headless=False,  # 浏览器可见
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--no-sandbox'
+                ]
+            )
+
+            try:
+                # 逐个处理商品
+                for url in urls:
+                    await self.download_product(browser, url)
+                    print()  # 空行分隔
+
+            finally:
+                # 不要关闭 browser，因为它是持久化上下文
+                await browser.close()
+
+        # 打印结果摘要
+        print("=" * 60)
+        print("处理完成！")
+        print(f"成功: {len(self.results['success'])} 个")
+        print(f"失败: {len(self.results['failed'])} 个")
+
+        if self.results["success"]:
+            print("\n成功的商品:")
+            for item in self.results["success"]:
+                print(f"  ✓ {item['title']}")
+                print(f"    头图: {item['cover_count']} 张, 详情图: {item['detail_count']} 张")
+                print(f"    位置: {item['path']}")
+
+        if self.results["failed"]:
+            print("\n失败的商品:")
+            for item in self.results["failed"]:
+                print(f"  ✗ {item['url']}")
+                print(f"    原因: {item['reason']}")
+
+        print("=" * 60)
+
+
+def main():
+    """命令行入口"""
+    if len(sys.argv) < 2:
+        print("用法: python downloader.py <商品链接1> <商品链接2> ...")
+        print("\n示例:")
+        print("  python downloader.py https://item.jd.com/100012345678.html")
+        print("  python downloader.py https://detail.tmall.com/item.htm?id=123456")
+        sys.exit(1)
+
+    urls = sys.argv[1:]
+    downloader = ProductDownloader()
+
+    try:
+        asyncio.run(downloader.run(urls))
+    except KeyboardInterrupt:
+        print("\n\n用户中断")
+    except Exception as e:
+        print(f"\n错误: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
