@@ -6,11 +6,28 @@ cd /Users/fangyaxin/qa-community/product-image-downloader
 ./install.sh
 ```
 
-## 使用
+## 使用 - 一步完成!
 
-### Claude Code Skill
+### Claude Code Skill(推荐)
+
+**最简单:**
 ```
-/product-image-downloader
+/product-image-downloader https://item.jd.com/100171737237.html
+```
+
+**带描述:**
+```
+/product-image-downloader 下载这个 https://item.jd.com/100171737237.html
+```
+
+**批量下载:**
+```
+/product-image-downloader 下载这些 https://item.jd.com/123.html https://detail.tmall.com/456.html
+```
+
+**关键词搜索:**
+```
+/product-image-downloader 小米手机
 ```
 
 ### 命令行
@@ -22,21 +39,27 @@ python3 downloader.py "商品链接"
 ## 示例
 
 ### 单个商品
-```bash
-python3 downloader.py "https://item.jd.com/100171737237.html"
+```
+/product-image-downloader https://item.jd.com/100171737237.html
 ```
 
 ### 多个商品
-```bash
-python3 downloader.py \
-  "https://item.jd.com/100171737237.html" \
-  "https://detail.tmall.com/item.htm?id=123456"
+```
+/product-image-downloader https://item.jd.com/123.html https://detail.tmall.com/456.html
 ```
 
 ### 关键词搜索
-```bash
-python3 downloader.py "小米手机"
 ```
+/product-image-downloader 小米手机
+```
+
+## 智能识别
+
+Skill会自动识别你的输入:
+- ✓ 直接链接: `https://item.jd.com/123.html`
+- ✓ 带描述: `下载这个 https://item.jd.com/123.html`
+- ✓ 多个链接: `https://item.jd.com/123.html https://detail.tmall.com/456.html`
+- ✓ 关键词: `小米手机`
 
 ## 输出位置
 ```
@@ -59,9 +82,10 @@ A: 浏览器会自动打开,等待30秒供你登录
 A: 头图通常完整,部分商品详情图可能抓取不全
 
 **Q: 如何批量下载?**
-A: 提供多个链接,用空格分隔
+A: 在一条命令中提供多个链接,用空格分隔
 
 ## 文档
 - USAGE.md - 完整使用指南
+- SKILL_SETUP.md - Skill设置说明
 - OPTIMIZATION.md - 优化记录
 - TEST_REPORT.md - 测试报告

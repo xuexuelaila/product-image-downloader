@@ -20,7 +20,7 @@
 
 ## 🚀 如何使用
 
-### 方法1: 在Claude Code中使用(推荐)
+### 方法1: 在Claude Code中使用(推荐) - 一步完成!
 
 1. **首次使用需要安装依赖:**
    ```bash
@@ -28,17 +28,29 @@
    ./install.sh
    ```
 
-2. **在Claude Code中调用:**
+2. **直接输入命令,一步完成!**
+
+   **示例1: 下载单个商品**
    ```
-   /product-image-downloader
+   /product-image-downloader 下载这个商品 https://item.jd.com/100171737237.html
    ```
 
-3. **输入商品链接:**
+   **示例2: 简洁方式**
    ```
-   https://item.jd.com/100171737237.html
+   /product-image-downloader https://item.jd.com/100171737237.html
    ```
 
-4. **等待下载完成,查看结果!**
+   **示例3: 批量下载**
+   ```
+   /product-image-downloader 下载这些 https://item.jd.com/123.html https://detail.tmall.com/456.html
+   ```
+
+   **示例4: 关键词搜索**
+   ```
+   /product-image-downloader 小米手机
+   ```
+
+3. **等待下载完成,查看结果!**
 
 ### 方法2: 命令行直接使用
 
@@ -58,27 +70,30 @@ python3 downloader.py \
 
 ## 📝 使用示例
 
-### 示例1: 下载京东商品
+### 示例1: 最简单的方式
 ```
-/product-image-downloader
-```
-输入: `https://item.jd.com/100171737237.html`
-
-### 示例2: 下载多个商品
-```
-/product-image-downloader
-```
-输入:
-```
-https://item.jd.com/100171737237.html
-https://detail.tmall.com/item.htm?id=123456
+/product-image-downloader https://item.jd.com/100171737237.html
 ```
 
-### 示例3: 关键词搜索(淘宝)
+### 示例2: 带描述的方式
 ```
-/product-image-downloader
+/product-image-downloader 下载这个商品的图片 https://item.jd.com/100171737237.html
 ```
-输入: `小米手机`
+
+### 示例3: 批量下载
+```
+/product-image-downloader 帮我下载这些商品 https://item.jd.com/123.html https://detail.tmall.com/456.html
+```
+
+### 示例4: 关键词搜索(淘宝)
+```
+/product-image-downloader 小米手机
+```
+
+### 示例5: 带搜索关键词
+```
+/product-image-downloader 搜索并下载 小米手机
+```
 
 ## 📂 输出位置
 
