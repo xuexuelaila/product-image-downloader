@@ -14,6 +14,100 @@ import aiohttp
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 
+class Config:
+    """配置类"""
+    # 浏览器配置
+    USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+    # 超时配置
+    PAGE_TIMEOUT = 60000
+    IMAGE_TIMEOUT = 30
+
+    # 滚动配置
+    MAX_SCROLLS = 30
+    SCROLL_STEP_MIN = 300
+    SCROLL_STEP_MAX = 500
+    SCROLL_DELAY_MIN = 1
+    SCROLL_DELAY_MAX = 2
+
+    # 图片尺寸过滤
+    MIN_IMAGE_SIZE = 200
+    MIN_DETAIL_SIZE = 400
+
+    # 选择器配置
+    TITLE_SELECTORS = {
+        'jd': [
+            ".sku-name",
+            ".itemInfo-wrap .sku-name",
+            "div.sku-name",
+            ".product-intro .name",
+            "#detail .name",
+            "h1",
+            "[class*='sku-name']",
+            "[class*='product-name']",
+            "[class*='item-name']"
+        ],
+        'tmall': [
+            ".tb-detail-hd h1",
+            ".tb-main-title",
+            "h1.tb-title",
+            "h1"
+        ],
+        'taobao': [
+            ".tb-main-title",
+            "h1.tb-title",
+            ".ItemTitle--mainTitle--",
+            "h1"
+        ]
+    }
+
+    COVER_SELECTORS = {
+        'jd': [
+            "#spec-list img",
+            ".spec-items img",
+            "ul.spec-items img",
+            "li.spec-item img",
+            "#main-image .list .item img",
+            ".preview-wrap .list .item img"
+        ],
+        'tmall': [
+            "#J_UlThumb img",
+            ".tb-thumb img",
+            "ul.tb-thumb li img"
+        ],
+        'taobao': [
+            "#J_UlThumb img",
+            ".tb-thumb img",
+            "ul.tb-thumb li img",
+            ".MainPic--mainPic-- img"
+        ]
+    }
+
+    DETAIL_SELECTORS = {
+        'jd': [
+            "#detail .detail-content img",
+            "#detail img.desc-img",
+            ".ssd-module-wrap img",
+            ".detail-content img",
+            "#J-detail-content img",
+            "#description img"
+        ],
+        'tmall': [
+            "#description img",
+            ".detail-content img",
+            "#J-detail-content img",
+            ".tm-clear img",
+            ".attributes-list img"
+        ],
+        'taobao': [
+            "#description img",
+            ".detail-content img",
+            "#J-detail-content img",
+            ".Description--desc-- img"
+        ]
+    }
+
+
 class ProductDownloader:
     def __init__(self, output_dir="downloads"):
         self.output_dir = Path(output_dir)
@@ -39,9 +133,65 @@ class ProductDownloader:
         """判断是否是 URL"""
         return text.startswith("http://") or text.startswith("https://") or text.startswith("www.")
 
-    async def scroll_to_bottom_gradually(self, page, max_scrolls=20):
-        """逐步滚动到页面底部，确保所有图片都加载"""
-        print("  开始逐步滚动页面，加载所有图片...")
+    async def find_element_by_selectors(self, page, selectors, get_text=False):
+        """通用的选择器查找方法"""
+        for selector in selectors:
+            try:
+                elem = await page.query_selector(selector)
+                if elem:
+                    if get_text:
+                        text = await elem.inner_text()
+                        text = text.strip()
+                        if text:
+                            print(f"  找到元素 (选择器: {selector})")
+                            return text
+                    else:
+                        return elem
+            except Exception:
+                continue
+        return None
+
+    def normalize_image_url(self, url, base_url=None):
+        """标准化图片URL"""
+        if not url:
+            return None
+
+        url = url.strip()
+
+        # 处理相对URL
+        if url.startswith("//"):
+            url = "https:" + url
+        elif url.startswith("/") and base_url:
+            url = base_url + url
+
+        # 过滤无效URL
+        if not any(ext in url.lower() for ext in ["img", "jpg", "png", "jpeg", "webp"]):
+            return None
+
+        return url
+
+    def convert_to_large_image(self, url, platform):
+        """将小图转换为大图URL"""
+        if platform == "jd":
+            # 京东图片转换
+            url = url.replace("/n5/", "/n1/").replace("/n0/", "/n1/").replace("/n7/", "/n1/")
+            url = url.replace("s54x54_", "s800x800_").replace("s40x40_", "s800x800_").replace("s350x350_", "s800x800_")
+            url = url.replace('.avif', '').replace('.webp', '')
+            if not url.endswith(('.jpg', '.png')):
+                url = url + '.jpg'
+        elif platform in ["tmall", "taobao"]:
+            # 淘宝/天猫图片转换
+            url = url.replace("_sum.jpg", "").replace("_210x210.jpg", "").replace("_180x180.jpg", "")
+            url = url.replace("_50x50.jpg", "_800x800.jpg")
+
+        return url
+
+    async def scroll_to_bottom_gradually(self, page, max_scrolls=None):
+        """逐步滚动到页面底部,确保所有图片都加载"""
+        if max_scrolls is None:
+            max_scrolls = Config.MAX_SCROLLS
+
+        print("  开始逐步滚动页面,加载所有图片...")
 
         import random
 
@@ -50,11 +200,11 @@ class ProductDownloader:
 
         while scroll_count < max_scrolls:
             # 滚动一小段距离
-            scroll_step = random.randint(300, 500)
+            scroll_step = random.randint(Config.SCROLL_STEP_MIN, Config.SCROLL_STEP_MAX)
             await page.evaluate(f"window.scrollBy(0, {scroll_step})")
 
-            # 随机等待 1-2 秒，让图片加载
-            await asyncio.sleep(random.uniform(1, 2))
+            # 随机等待,让图片加载
+            await asyncio.sleep(random.uniform(Config.SCROLL_DELAY_MIN, Config.SCROLL_DELAY_MAX))
 
             # 获取新的页面高度
             new_height = await page.evaluate("document.body.scrollHeight")
@@ -62,64 +212,64 @@ class ProductDownloader:
 
             scroll_count += 1
 
-            # 如果已经到达底部，再多滚动几次确保所有图片都加载
+            # 如果已经到达底部,再多滚动几次确保所有图片都加载
             if current_position >= new_height - 100:
-                print(f"  已到达页面底部，再滚动 2 次确保图片加载...")
+                print(f"  已到达页面底部,再滚动 2 次确保图片加载...")
                 for _ in range(2):
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await asyncio.sleep(2)
                 break
 
-            # 如果页面高度没有变化，说明可能已经到底了
+            # 如果页面高度没有变化,说明可能已经到底了
             if new_height == last_height and current_position >= new_height - 100:
                 break
 
             last_height = new_height
 
-        print(f"  滚动完成，共滚动 {scroll_count} 次")
+        print(f"  滚动完成,共滚动 {scroll_count} 次")
 
     async def get_all_images_js(self, page, platform):
         """使用 JavaScript 获取页面上所有商品图片"""
         print("  使用 JavaScript 获取所有图片...")
 
-        js_code = """
-        () => {
+        js_code = f"""
+        () => {{
             const images = [];
             const seen = new Set();
 
             // 获取所有 img 标签
-            document.querySelectorAll('img').forEach(img => {
+            document.querySelectorAll('img').forEach(img => {{
                 const src = img.src || img.dataset.src || img.dataset.lazySrc ||
                            img.dataset.original || img.dataset.url;
 
                 if (!src) return;
 
-                // 过滤掉太小的图片（图标、logo等）
+                // 过滤掉太小的图片(图标、logo等)
                 const width = img.naturalWidth || img.width || 0;
                 const height = img.naturalHeight || img.height || 0;
 
-                // 至少一个维度大于 200px，或者包含特定关键词
-                const isLargeEnough = width > 200 || height > 200;
+                // 至少一个维度大于配置的最小尺寸,或者包含特定关键词
+                const isLargeEnough = width > {Config.MIN_IMAGE_SIZE} || height > {Config.MIN_IMAGE_SIZE};
                 const hasProductKeyword = src.includes('img') || src.includes('image') ||
                                          src.includes('pic') || src.includes('photo');
 
-                if ((isLargeEnough || hasProductKeyword) && !seen.has(src)) {
+                if ((isLargeEnough || hasProductKeyword) && !seen.has(src)) {{
                     seen.add(src);
-                    images.push({
+                    images.push({{
                         src: src,
                         width: width,
                         height: height,
                         alt: img.alt || '',
                         className: img.className || ''
-                    });
-                }
-            });
+                    }});
+                }}
+            }});
 
-            // 按图片大小排序（大图优先）
+            // 按图片大小排序(大图优先)
             images.sort((a, b) => (b.width * b.height) - (a.width * a.height));
 
             return images;
-        }
+        }}
         """
 
         try:
@@ -129,6 +279,95 @@ class ProductDownloader:
         except Exception as e:
             print(f"  JavaScript 获取图片失败: {e}")
             return []
+
+    async def get_images_by_selectors(self, page, selectors, platform, image_type="cover"):
+        """通用的图片获取方法"""
+        urls = []
+
+        for selector in selectors:
+            try:
+                imgs = await page.query_selector_all(selector)
+                for img in imgs:
+                    # 尝试多个属性
+                    src = (await img.get_attribute("src") or
+                           await img.get_attribute("data-lazy-img") or
+                           await img.get_attribute("data-src") or
+                           await img.get_attribute("data-url") or
+                           await img.get_attribute("data-original"))
+
+                    if src:
+                        # 标准化URL
+                        src = self.normalize_image_url(src, "https://item.jd.com" if platform == "jd" else None)
+                        if not src:
+                            continue
+
+                        # 转换为大图
+                        src = self.convert_to_large_image(src, platform)
+
+                        # 过滤重复和无效URL
+                        if src not in urls:
+                            # 对于京东,过滤占位图
+                            if platform == "jd" and "imagetools" in src and "68f9ecedF64a04bb8" in src:
+                                continue
+
+                            # 对于详情图,过滤太小的图片
+                            if image_type == "detail":
+                                if "s40x40" in src or "s54x54" in src:
+                                    continue
+
+                            urls.append(src)
+                            print(f"    添加{image_type}图: {src[:80]}...")
+
+                if urls:
+                    print(f"  找到{image_type}图 (选择器: {selector}): {len(urls)} 张")
+                    break
+            except Exception as e:
+                print(f"  选择器 {selector} 失败: {e}")
+                continue
+
+        return urls
+
+    async def get_title(self, page, platform):
+        """获取商品标题"""
+        selectors = Config.TITLE_SELECTORS.get(platform, [])
+        title = await self.find_element_by_selectors(page, selectors, get_text=True)
+
+        if not title:
+            # 尝试从页面标题获取
+            page_title = await page.title()
+            print(f"  页面标题: {page_title}")
+            raise Exception("无法获取商品标题")
+
+        print(f"  商品标题: {title}")
+        return title
+
+    async def get_cover_images(self, page, platform):
+        """获取头图"""
+        print("  获取头图...")
+        selectors = Config.COVER_SELECTORS.get(platform, [])
+        return await self.get_images_by_selectors(page, selectors, platform, "cover")
+
+    async def get_detail_images(self, page, platform):
+        """获取详情图"""
+        print("  获取详情图...")
+        selectors = Config.DETAIL_SELECTORS.get(platform, [])
+        urls = await self.get_images_by_selectors(page, selectors, platform, "detail")
+
+        # 如果没有找到详情图,使用 JavaScript 方法作为备用
+        if not urls:
+            print("  使用 JavaScript 方法获取详情图...")
+            all_images = await self.get_all_images_js(page, platform)
+            for img_info in all_images:
+                src = img_info['src']
+                # 过滤出详情图(通常是大图)
+                if img_info['width'] > Config.MIN_DETAIL_SIZE or img_info['height'] > Config.MIN_DETAIL_SIZE:
+                    src = self.normalize_image_url(src)
+                    if src and src not in urls:
+                        urls.append(src)
+            if urls:
+                print(f"  找到详情图 (JavaScript): {len(urls)} 张")
+
+        return urls
 
     async def search_taobao(self, page, keyword):
         """在淘宝搜索商品并进入第一个商品详情页"""
@@ -383,6 +622,72 @@ class ProductDownloader:
         # 使用改进的滚动方法，逐步滚动到页面底部，确保所有图片都加载
         await self.scroll_to_bottom_gradually(page, max_scrolls=30)
 
+        # 尝试点击"商品详情"标签
+        try:
+            print("  尝试点击'商品详情'标签...")
+            # 京东的商品详情标签可能有多种选择器
+            detail_tab_selectors = [
+                "text=商品详情",
+                "#detail-tab",
+                "a:has-text('商品详情')",
+                "[data-tab='detail']",
+                ".tab-item:has-text('商品详情')"
+            ]
+
+            clicked = False
+            for selector in detail_tab_selectors:
+                try:
+                    tab = await page.query_selector(selector)
+                    if tab:
+                        await tab.click()
+                        print(f"  已点击'商品详情'标签 (选择器: {selector})")
+                        clicked = True
+                        break
+                except:
+                    continue
+
+            if clicked:
+                # 等待详情图加载
+                print("  等待详情图加载...")
+                await asyncio.sleep(3)
+
+                # 滚动到详情区域
+                print("  滚动到详情区域...")
+                try:
+                    # 尝试找到详情容器并滚动到它
+                    detail_container = await page.query_selector("#detail, #sx-product-detail, .detail-content")
+                    if detail_container:
+                        await detail_container.scroll_into_view_if_needed()
+                        await asyncio.sleep(2)
+                except:
+                    pass
+
+                # 多次滚动详情区域，触发懒加载
+                print("  多次滚动详情区域，触发图片加载...")
+                for i in range(15):
+                    await page.evaluate("window.scrollBy(0, 800)")
+                    await asyncio.sleep(2)
+                    if i % 3 == 0:
+                        print(f"    滚动 {i+1}/15")
+
+                # 再等待一段时间确保图片加载
+                print("  等待图片完全加载...")
+                await asyncio.sleep(10)
+
+                # 保存点击后的截图和HTML
+                await page.screenshot(path="debug_jd_detail.png", full_page=True)
+                print("  已保存详情页截图: debug_jd_detail.png")
+                html_content = await page.content()
+                with open("debug_jd_detail.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                print("  已保存详情页 HTML: debug_jd_detail.html")
+            else:
+                print("  未找到'商品详情'标签，继续...")
+                await asyncio.sleep(3)
+        except Exception as e:
+            print(f"  点击'商品详情'标签失败: {e}")
+            await asyncio.sleep(3)
+
         # 回到页面顶部，准备抓取头图
         await page.evaluate("window.scrollTo(0, 0)")
         await asyncio.sleep(2)
@@ -529,6 +834,69 @@ class ProductDownloader:
         # 获取详情图 - 只抓取商品详情区域
         detail_urls = []
         try:
+            print("  开始抓取详情图...")
+
+            # 方法1: 使用JavaScript获取所有大图,包括avif格式
+            all_images = await page.evaluate("""
+                () => {
+                    const images = [];
+                    const seen = new Set();
+
+                    // 获取所有img标签
+                    document.querySelectorAll('img').forEach(img => {
+                        const src = img.src || img.dataset.src || img.dataset.lazyload ||
+                                   img.dataset.lazySrc || img.dataset.original;
+
+                        if (!src || seen.has(src)) return;
+
+                        const width = img.naturalWidth || img.width || parseInt(img.getAttribute('width')) || 0;
+                        const height = img.naturalHeight || img.height || parseInt(img.getAttribute('height')) || 0;
+
+                        // 过滤：宽度或高度大于400px的图片,或者包含/sku/路径的图片(详情图)
+                        if (width > 400 || height > 400 || src.includes('/sku/')) {
+                            // 排除占位图和小图标
+                            if (!src.includes('68f9ecedF64a04bb8') &&
+                                !src.includes('icon') &&
+                                !src.includes('logo') &&
+                                !src.includes('s40x40') &&
+                                !src.includes('s54x54')) {
+                                seen.add(src);
+                                images.push({
+                                    src: src,
+                                    width: width,
+                                    height: height
+                                });
+                            }
+                        }
+                    });
+
+                    return images;
+                }
+            """)
+
+            print(f"  JavaScript找到 {len(all_images)} 张大图")
+
+            # 过滤出详情图
+            for img_info in all_images:
+                src = img_info['src']
+                if src.startswith("//"):
+                    src = "https:" + src
+
+                # 详情图特征: 包含/sku/路径,或者尺寸很大
+                is_detail = '/sku/' in src or img_info['width'] > 600 or img_info['height'] > 600
+
+                if is_detail and src not in detail_urls:
+                    # 处理avif格式,转换为jpg
+                    if src.endswith('.avif'):
+                        src = src.replace('.jpg.avif', '.jpg').replace('.avif', '.jpg')
+
+                    detail_urls.append(src)
+                    print(f"    添加详情图 ({img_info['width']}x{img_info['height']}): {src[:80]}...")
+
+            print(f"  共找到 {len(detail_urls)} 张详情图")
+
+        except Exception as e:
+            print(f"  详情图抓取失败: {e}")
             # 京东的详情图通常在特定的详情容器中
             detail_selectors = [
                 "#detail .detail-content img",

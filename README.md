@@ -1,58 +1,65 @@
-# Product Image Downloader - 安装和使用指南
+# Product Image Downloader - 商品图片下载器
 
-## 安装步骤
+自动从电商平台批量下载商品图片的工具。
 
-1. 安装 Python 依赖：
+## 特性
+
+- ✓ 支持京东、天猫、淘宝
+- ✓ 自动抓取头图和详情图
+- ✓ 支持批量下载
+- ✓ 支持关键词搜索
+- ✓ 自动处理登录
+- ✓ 智能滚动加载
+- ✓ 代码已优化
+
+## 快速开始
+
+### 1. 安装
+
+```bash
+cd /Users/fangyaxin/qa-community/product-image-downloader
+./install.sh
+```
+
+或手动安装:
+
 ```bash
 cd scripts
 pip install -r requirements.txt
-```
-
-2. 安装 Playwright 浏览器：
-```bash
 playwright install chromium
 ```
 
-## 使用方法
+### 2. 使用
 
-### 方式 1: 直接运行脚本
+#### 方式A: Claude Code Skill(推荐)
 
-```bash
-cd scripts
-python downloader.py <商品链接1> <商品链接2> ...
 ```
-
-示例：
-```bash
-python downloader.py \
-  https://item.jd.com/100012345678.html \
-  https://detail.tmall.com/item.htm?id=123456 \
-  https://item.taobao.com/item.htm?id=789012
-```
-
-### 方式 2: 通过 Claude Code Skill 调用
-
-```bash
 /product-image-downloader
 ```
 
-然后输入商品链接（每行一个）。
+然后输入商品链接。
+
+#### 方式B: 命令行
+
+```bash
+cd scripts
+python3 downloader.py "https://item.jd.com/100171737237.html"
+```
+
+## 文档
+
+- [USAGE.md](USAGE.md) - 详细使用指南
+- [OPTIMIZATION.md](OPTIMIZATION.md) - 代码优化记录
+- [TEST_REPORT.md](TEST_REPORT.md) - 测试报告
+- [DETAIL_IMAGE_ISSUE.md](DETAIL_IMAGE_ISSUE.md) - 详情图问题说明
 
 ## 输出结构
-
-下载的图片会保存在 `downloads/` 目录下，结构如下：
 
 ```
 downloads/
 └── 商品标题/
-    ├── cover/      # 商品头图
-    │   ├── 001.jpg
-    │   ├── 002.jpg
-    │   └── ...
-    └── detail/     # 商品详情图
-        ├── 001.jpg
-        ├── 002.jpg
-        └── ...
+    ├── cover/      # 头图
+    └── detail/     # 详情图
 ```
 
 ## 支持平台
@@ -61,10 +68,6 @@ downloads/
 - 天猫 (tmall.com)
 - 淘宝 (taobao.com)
 
-## 注意事项
+## 许可证
 
-1. 首次运行需要安装 Playwright 浏览器
-2. 某些商品可能需要登录才能查看详情
-3. 网络不稳定可能导致部分图片下载失败
-4. 文件名会自动清理非法字符
-5. 重复的商品标题会自动追加序号
+MIT License
