@@ -537,7 +537,7 @@ class ProductDownloader:
 
         return product_dir, cover_dir, detail_dir
 
-    async def download_image(self, session, url, path, index):
+    async def download_image(self, session, url, path, index, title=None):
         """下载单张图片"""
         try:
             # 处理相对 URL
@@ -549,7 +549,13 @@ class ProductDownloader:
                     content = await response.read()
                     # 从 URL 获取扩展名，默认 jpg
                     ext = Path(urlparse(url).path).suffix or ".jpg"
-                    file_path = path / f"{index:03d}{ext}"
+                    # 使用商品标题作为文件名
+                    if title:
+                        # 清理文件名中的非法字符
+                        safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
+                        file_path = path / f"{safe_title}_{index:03d}{ext}"
+                    else:
+                        file_path = path / f"{index:03d}{ext}"
                     file_path.write_bytes(content)
                     return True
         except Exception as e:
@@ -583,36 +589,92 @@ class ProductDownloader:
             f.write(html_content)
         print("  已保存页面 HTML: debug_jd.html")
 
-        # 获取商品标题 - 扩展选择器列表
-        title_selectors = [
-            ".sku-name",
-            ".itemInfo-wrap .sku-name",
-            "div.sku-name",
-            ".product-intro .name",
-            "#detail .name",
-            "h1",
-            "[class*='sku-name']",
-            "[class*='product-name']",
-            "[class*='item-name']"
-        ]
+        # 获取商品标题 - 优先从 JavaScript 中提取
         title = None
-        for selector in title_selectors:
-            try:
-                title_elem = await page.query_selector(selector)
-                if title_elem:
-                    title = await title_elem.inner_text()
-                    title = title.strip()
-                    if title:
-                        print(f"  找到标题 (选择器: {selector}): {title[:50]}...")
-                        break
-            except:
-                continue
 
+        # 方法1: 从 JavaScript 中提取商品名称
+        try:
+            print("  尝试从 JavaScript 中提取商品标题...")
+            title = await page.evaluate("""
+                () => {
+                    // 查找页面中的商品名称变量
+                    const scripts = document.querySelectorAll('script');
+                    for (let script of scripts) {
+                        const text = script.textContent;
+                        // 匹配 name: '商品名称'
+                        const match = text.match(/name:\\s*'([^']+)'/);
+                        if (match && match[1] && match[1].length > 10) {
+                            return match[1];
+                        }
+                    }
+                    return null;
+                }
+            """)
+            if title:
+                print(f"  从 JavaScript 中找到标题: {title[:50]}...")
+        except Exception as e:
+            print(f"  从 JavaScript 提取标题失败: {e}")
+
+        # 方法2: 使用 DOM 选择器（备用方案）
         if not title:
-            # 调试：输出页面标题
-            page_title = await page.title()
-            print(f"  页面标题: {page_title}")
-            raise Exception("无法获取商品标题")
+            title_selectors = [
+                ".sku-name",
+                ".itemInfo-wrap .sku-name",
+                "div.sku-name",
+                "h1",
+                "[class*='sku-name']",
+                "[class*='product-name']",
+                "[class*='item-name']"
+            ]
+            for selector in title_selectors:
+                try:
+                    title_elem = await page.query_selector(selector)
+                    if title_elem:
+                        title = await title_elem.inner_text()
+                        title = title.strip()
+                        # 过滤掉明显不是商品标题的文本
+                        if title and len(title) > 10 and "只换不修" not in title and "全保换新" not in title:
+                            print(f"  找到标题 (选择器: {selector}): {title[:50]}...")
+                            break
+                        else:
+                            title = None
+                except:
+                    continue
+
+        # 方法3: 从页面 title 标签提取（兜底方案）
+        if not title:
+            try:
+                print("  尝试从页面 title 标签提取标题...")
+                page_title = await page.title()
+                # 移除京东特有的后缀
+                title = page_title.split("【图片")[0].split("-京东")[0].split("_")[0].strip()
+                if title and len(title) > 10:
+                    print(f"  从页面 title 提取标题: {title[:50]}...")
+                else:
+                    title = None
+            except Exception as e:
+                print(f"  从页面 title 提取标题失败: {e}")
+
+        # 方法4: 使用商品 ID 作为标题（最终兜底）
+        if not title:
+            try:
+                print("  使用商品 ID 作为标题（兜底方案）...")
+                # 从 URL 中提取商品 ID
+                import re
+                match = re.search(r'/(\d+)\.html', url)
+                if match:
+                    sku_id = match.group(1)
+                    title = f"商品_{sku_id}"
+                    print(f"  使用商品 ID: {title}")
+                else:
+                    # 如果连 ID 都提取不到，使用时间戳
+                    from datetime import datetime
+                    title = f"商品_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    print(f"  使用时间戳: {title}")
+            except Exception as e:
+                print(f"  生成兜底标题失败: {e}")
+                # 最终兜底：使用固定名称
+                title = "未知商品"
 
         print(f"  商品标题: {title}")
 
@@ -1257,7 +1319,7 @@ class ProductDownloader:
                 # 下载头图
                 print(f"  下载头图: {len(cover_urls)} 张")
                 cover_tasks = [
-                    self.download_image(session, url, cover_dir, i)
+                    self.download_image(session, url, cover_dir, i, title)
                     for i, url in enumerate(cover_urls, 1)
                 ]
                 cover_results = await asyncio.gather(*cover_tasks)
@@ -1266,7 +1328,7 @@ class ProductDownloader:
                 # 下载详情图
                 print(f"  下载详情图: {len(detail_urls)} 张")
                 detail_tasks = [
-                    self.download_image(session, url, detail_dir, i)
+                    self.download_image(session, url, detail_dir, i, title)
                     for i, url in enumerate(detail_urls, 1)
                 ]
                 detail_results = await asyncio.gather(*detail_tasks)
