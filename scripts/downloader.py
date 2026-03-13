@@ -1255,7 +1255,12 @@ class ProductDownloader:
                 finally:
                     await page.close()
 
-            # 创建文件夹
+            # 检查是否有图片需要下载
+            if not cover_urls or len(cover_urls) == 0:
+                print(f"  ✗ 未获取到任何图片，跳过创建文件夹")
+                raise Exception("未获取到任何图片")
+
+            # 创建文件夹（只在有图片时创建）
             product_dir, cover_dir = self.create_folder_structure(title)
 
             # 下载图片
