@@ -733,7 +733,7 @@ class ProductDownloader:
         print(f"  商品标题: {title}")
 
         # 创建文件夹
-        product_dir, cover_dir = self.create_folder_structure(title)
+        product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
 
         # 使用改进的滚动方法，逐步滚动到页面底部，确保所有图片都加载
         await self.scroll_to_bottom_gradually(page, max_scrolls=30)
@@ -947,8 +947,127 @@ class ProductDownloader:
 
         print(f"  头图 URLs: {cover_urls[:3] if cover_urls else '无'}...")  # 调试：打印前3个URL
 
+        # 获取详情图 - 只抓取商品详情区域
+        detail_urls = []
+        try:
+            print("  开始抓取详情图...")
 
-        return title, cover_urls
+            # 方法1: 使用JavaScript获取所有大图,包括avif格式
+            all_images = await page.evaluate("""
+                () => {
+                    const images = [];
+                    const seen = new Set();
+
+                    // 获取所有img标签
+                    document.querySelectorAll('img').forEach(img => {
+                        const src = img.src || img.dataset.src || img.dataset.lazyload ||
+                                   img.dataset.lazySrc || img.dataset.original;
+
+                        if (!src || seen.has(src)) return;
+
+                        const width = img.naturalWidth || img.width || parseInt(img.getAttribute('width')) || 0;
+                        const height = img.naturalHeight || img.height || parseInt(img.getAttribute('height')) || 0;
+
+                        // 过滤：宽度或高度大于400px的图片,或者包含/sku/路径的图片(详情图)
+                        if (width > 400 || height > 400 || src.includes('/sku/')) {
+                            // 排除占位图和小图标
+                            if (!src.includes('68f9ecedF64a04bb8') &&
+                                !src.includes('icon') &&
+                                !src.includes('logo') &&
+                                !src.includes('s40x40') &&
+                                !src.includes('s54x54')) {
+                                seen.add(src);
+                                images.push({
+                                    src: src,
+                                    width: width,
+                                    height: height
+                                });
+                            }
+                        }
+                    });
+
+                    return images;
+                }
+            """)
+
+            print(f"  JavaScript找到 {len(all_images)} 张大图")
+
+            # 过滤出详情图
+            for img_info in all_images:
+                src = img_info['src']
+                if src.startswith("//"):
+                    src = "https:" + src
+
+                # 详情图特征: 包含/sku/路径,或者尺寸很大
+                is_detail = '/sku/' in src or img_info['width'] > 600 or img_info['height'] > 600
+
+                if is_detail and src not in detail_urls:
+                    # 处理avif格式,转换为jpg
+                    if src.endswith('.avif'):
+                        src = src.replace('.jpg.avif', '.jpg').replace('.avif', '.jpg')
+
+                    detail_urls.append(src)
+                    print(f"    添加详情图 ({img_info['width']}x{img_info['height']}): {src[:80]}...")
+
+            print(f"  共找到 {len(detail_urls)} 张详情图")
+
+        except Exception as e:
+            print(f"  详情图抓取失败: {e}")
+            # 京东的详情图通常在特定的详情容器中
+            detail_selectors = [
+                "#detail .detail-content img",
+                "#detail img.desc-img",
+                ".ssd-module-wrap img",
+                ".detail-content img",
+                "#J-detail-content img",
+                "#description img"
+            ]
+
+            for selector in detail_selectors:
+                try:
+                    imgs = await page.query_selector_all(selector)
+                    for img in imgs:
+                        src = await img.get_attribute("src") or await img.get_attribute("data-lazy-img") or await img.get_attribute("data-src")
+                        if src:
+                            src = src.strip()
+                            if src.startswith("//"):
+                                src = "https:" + src
+                            elif src.startswith("/"):
+                                src = "https://item.jd.com" + src
+
+                            # 过滤掉明显不是商品图的图片（如小图标、按钮等）
+                            if src not in detail_urls and any(ext in src.lower() for ext in ["img", "jpg", "png", "jpeg", "webp"]):
+                                # 排除太小的图片（通常是图标）
+                                if "s40x40" not in src and "s54x54" not in src:
+                                    detail_urls.append(src)
+
+                    if detail_urls:
+                        print(f"  找到详情图 (选择器: {selector}): {len(detail_urls)} 张")
+                        break
+                except:
+                    continue
+
+            # 如果没有找到详情图，使用 JavaScript 方法作为备用
+            if not detail_urls:
+                print("  使用 JavaScript 方法获取详情图...")
+                all_images = await self.get_all_images_js(page, "jd")
+                for img_info in all_images:
+                    src = img_info['src']
+                    # 过滤出详情图（通常是大图）
+                    if img_info['width'] > 400 or img_info['height'] > 400:
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        if src not in cover_urls and src not in detail_urls:
+                            detail_urls.append(src)
+                if detail_urls:
+                    print(f"  找到详情图 (JavaScript): {len(detail_urls)} 张")
+
+        except Exception as e:
+            print(f"  详情图抓取失败: {e}")
+
+        print(f"  详情图 URLs: {detail_urls[:3] if detail_urls else '无'}...")  # 调试
+
+        return title, cover_urls, detail_urls
 
     async def download_tmall(self, page, url):
         """下载天猫商品"""
@@ -982,7 +1101,7 @@ class ProductDownloader:
         print(f"  商品标题: {title}")
 
         # 创建文件夹
-        product_dir, cover_dir = self.create_folder_structure(title)
+        product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
 
         # 使用改进的滚动方法，逐步滚动到页面底部
         await self.scroll_to_bottom_gradually(page, max_scrolls=30)
@@ -1060,7 +1179,7 @@ class ProductDownloader:
         except:
             pass
 
-        return title, cover_urls
+        return title, cover_urls, detail_urls
 
     async def download_taobao(self, page, url):
         """下载淘宝商品"""
@@ -1094,7 +1213,7 @@ class ProductDownloader:
         print(f"  商品标题: {title}")
 
         # 创建文件夹
-        product_dir, cover_dir = self.create_folder_structure(title)
+        product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
 
         # 使用改进的滚动方法，逐步滚动到页面底部
         await self.scroll_to_bottom_gradually(page, max_scrolls=30)
@@ -1172,13 +1291,14 @@ class ProductDownloader:
         except:
             pass
 
-        return title, cover_urls
+        return title, cover_urls, detail_urls
 
     async def download_product(self, browser, url_or_keyword):
         """下载单个商品（支持 URL 或关键词搜索）"""
         try:
             title = None
             cover_urls = []
+            detail_urls = []
             input_text = url_or_keyword
 
             # 判断是 URL 还是关键词
@@ -1201,7 +1321,7 @@ class ProductDownloader:
 
                 if api_result:
                     # API 成功，直接使用 API 返回的数据
-                    title, cover_urls = api_result
+                    title, cover_urls, detail_urls = api_result
                 else:
                     # API 未启用或失败，使用爬虫模式
                     # 创建新页面并设置用户代理
@@ -1227,11 +1347,11 @@ class ProductDownloader:
                     try:
                         # 根据平台调用对应的下载方法
                         if platform == "jd":
-                            title, cover_urls = await self.download_jd(page, url)
+                            title, cover_urls, detail_urls = await self.download_jd(page, url)
                         elif platform == "tmall":
-                            title, cover_urls = await self.download_tmall(page, url)
+                            title, cover_urls, detail_urls = await self.download_tmall(page, url)
                         elif platform == "taobao":
-                            title, cover_urls = await self.download_taobao(page, url)
+                            title, cover_urls, detail_urls = await self.download_taobao(page, url)
                         else:
                             raise Exception(f"未实现的平台: {platform}")
                     finally:
@@ -1251,12 +1371,12 @@ class ProductDownloader:
                 })
 
                 try:
-                    title, cover_urls = await self.search_taobao(page, keyword)
+                    title, cover_urls, detail_urls = await self.search_taobao(page, keyword)
                 finally:
                     await page.close()
 
             # 创建文件夹
-            product_dir, cover_dir = self.create_folder_structure(title)
+            product_dir, cover_dir, detail_dir = self.create_folder_structure(title)
 
             # 下载图片
             async with aiohttp.ClientSession() as session:
@@ -1269,14 +1389,23 @@ class ProductDownloader:
                 cover_results = await asyncio.gather(*cover_tasks)
                 cover_success = sum(cover_results)
 
-            print(f"  完成: 头图 {cover_success}/{len(cover_urls)}")
+                # 下载详情图
+                print(f"  下载详情图: {len(detail_urls)} 张")
+                detail_tasks = [
+                    self.download_image(session, url, detail_dir, i, title)
+                    for i, url in enumerate(detail_urls, 1)
+                ]
+                detail_results = await asyncio.gather(*detail_tasks)
+                detail_success = sum(detail_results)
+
+            print(f"  完成: 头图 {cover_success}/{len(cover_urls)}, 详情图 {detail_success}/{len(detail_urls)}")
             print(f"  保存位置: {product_dir}")
 
             self.results["success"].append({
                 "url": input_text,
                 "title": title,
                 "cover_count": cover_success,
-                
+                "detail_count": detail_success,
                 "path": str(product_dir)
             })
 
@@ -1330,7 +1459,7 @@ class ProductDownloader:
             print("\n成功的商品:")
             for item in self.results["success"]:
                 print(f"  ✓ {item['title']}")
-                print(f"    头图: {item['cover_count']} 张")
+                print(f"    头图: {item['cover_count']} 张, 详情图: {item['detail_count']} 张")
                 print(f"    位置: {item['path']}")
 
         if self.results["failed"]:

@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 import jd.api
 from jd.api.rest.UnionOpenGoodsQueryRequest import UnionOpenGoodsQueryRequest, GoodsReqDTO
 from jd.api.rest.UnionOpenGoodsBigfieldQueryRequest import UnionOpenGoodsBigfieldQueryRequest, GoodsReq
+from jd.api.rest.UnionOpenGoodsItemidGetRequest import UnionOpenGoodsItemidGetRequest, ItemIdReq
 
 
 class JDApiClient:
@@ -33,6 +34,46 @@ class JDApiClient:
         if match:
             return match.group(1)
         return None
+
+    # ==================== 基础商品查询 ====================
+
+    def get_item_id(self, sku: str) -> Optional[str]:
+        """
+        使用 jd.union.open.goods.itemid.get 将 SKU 转换为 itemId
+
+        Returns:
+            itemId 字符串 或 None
+        """
+        try:
+            print(f"  [API] 获取 itemId (SKU: {sku})...")
+            request = UnionOpenGoodsItemidGetRequest(self.domain, 80)
+
+            item_id_req = ItemIdReq()
+            item_id_req.skuIds = [int(sku)]
+
+            request.itemIdReq = item_id_req
+
+            response = request.getResponse("")
+            print(f"  [API] itemid.get 响应: {json.dumps(response, ensure_ascii=False)[:300]}...")
+
+            if response and 'jd_union_open_goods_itemid_get_responce' in response:
+                result = response['jd_union_open_goods_itemid_get_responce']
+                if 'queryResult' in result:
+                    query_result = json.loads(result['queryResult'])
+                    if query_result.get('code') == 200:
+                        data = query_result.get('data', [])
+                        if data and len(data) > 0:
+                            item_id = data[0].get('itemId')
+                            if item_id:
+                                print(f"  [API] 成功获取 itemId: {item_id[:20]}...")
+                                return item_id
+                    else:
+                        print(f"  [API] 错误: {query_result.get('message', '未知错误')}")
+            return None
+
+        except Exception as e:
+            print(f"  [API] itemid.get 请求失败: {e}")
+            return None
 
     # ==================== 基础商品查询 ====================
 
@@ -83,11 +124,18 @@ class JDApiClient:
             大字段信息字典 或 None
         """
         try:
-            print(f"  [API] 查询商品大字段信息 (SKU: {sku})...")
+            # 先获取 itemId
+            item_id = self.get_item_id(sku)
+            if not item_id:
+                print(f"  [API] 无法获取 itemId，跳过大字段查询")
+                return None
+
+            print(f"  [API] 查询商品大字段信息 (itemId: {item_id[:20]}...)...")
             request = UnionOpenGoodsBigfieldQueryRequest(self.domain, 80)
 
             goods_req = GoodsReq()
-            goods_req.skuIds = [int(sku)]
+            # 使用 itemIds 而不是 skuIds
+            goods_req.itemIds = [item_id]
             # 请求所有大字段：基础大字段(详情图)、视频大字段、图片信息
             goods_req.fields = [
                 "baseBigFieldInfo",
@@ -96,6 +144,8 @@ class JDApiClient:
                 "imageInfo",
                 "categoryInfo"
             ]
+            # 添加 sceneId 参数（必需）
+            goods_req.sceneId = "1"  # 1 表示通用场景
 
             request.goodsReq = goods_req
 
